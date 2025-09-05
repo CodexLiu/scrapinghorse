@@ -9,7 +9,9 @@ from slowapi.errors import RateLimitExceeded
 
 @app.function()
 @modal.concurrent(max_inputs=10)
-@modal.asgi_app()
+@modal.asgi_app(
+    custom_domains=["api.scrapinghorse.com"],
+)
 def f():
     from fastapi import FastAPI, Depends
     from fastapi.middleware.cors import CORSMiddleware

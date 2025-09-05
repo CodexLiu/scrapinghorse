@@ -1,9 +1,11 @@
 import os
 import time
 import requests
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from v1.schemas.api import SearchRequest, SearchResponse
 from v1.rate_limiter import limiter, RateLimits
+import urllib.parse
+from requests.exceptions import Timeout, ConnectionError, RequestException
 
 router = APIRouter(
     prefix="/v1",
@@ -26,23 +28,69 @@ async def search(
     API_BASE_URL = os.getenv("BASE_URL", "")
     API_KEY = os.getenv("API_KEY", "dev")
     ENDPOINT = "/search"
-    REQUEST_TIMEOUT = 30
+    REQUEST_TIMEOUT = 45
+    
+    constructed_url = f"{API_BASE_URL}{ENDPOINT}?{urllib.parse.urlencode(search_request.model_dump())}"
     
     headers = {
         "X-API-Key": API_KEY
     }
     start_time = time.time()
-    response = requests.get(
-        f"{API_BASE_URL}{ENDPOINT}",
-        params=search_request.model_dump(),
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-    )
-    print(f"Request time: {time.time() - start_time} seconds")
-    response.raise_for_status()
-    data = response.json()
-    return SearchResponse(
-        text_blocks=data["text_blocks"],
-        references=data["references"],
-        inline_images=data["inline_images"],
-    )
+    
+    try:
+        response = requests.get(
+            constructed_url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        print(f"Request time: {time.time() - start_time} seconds")
+        response.raise_for_status()
+        data = response.json()
+        return SearchResponse(
+            text_blocks=data["text_blocks"],
+            references=data["references"],
+            inline_images=data["inline_images"],
+        )
+    
+    except Timeout:
+        elapsed_time = time.time() - start_time
+        print(f"Request timed out after {elapsed_time:.2f} seconds")
+        raise HTTPException(
+            status_code=504,
+            detail=f"The search request timed out after {REQUEST_TIMEOUT} seconds. Please try again."
+        )
+    
+    except ConnectionError:
+        elapsed_time = time.time() - start_time
+        print(f"Connection error after {elapsed_time:.2f} seconds")
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to connect to the search service. Please try again later."
+        )
+    
+    except requests.exceptions.HTTPError as e:
+        elapsed_time = time.time() - start_time
+        print(f"HTTP error after {elapsed_time:.2f} seconds: {e}")
+        if e.response.status_code == 401:
+            raise HTTPException(
+                status_code=502,
+                detail="Authentication failed with the search service."
+            )
+        elif e.response.status_code >= 500:
+            raise HTTPException(
+                status_code=502,
+                detail="The search service is currently experiencing issues. Please try again later."
+            )
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Search service returned an error: {e.response.status_code}"
+            )
+    
+    except RequestException as e:
+        elapsed_time = time.time() - start_time
+        print(f"Request exception after {elapsed_time:.2f} seconds: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="An unexpected error occurred while contacting the search service. Please try again."
+        )
