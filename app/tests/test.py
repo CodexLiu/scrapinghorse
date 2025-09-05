@@ -1,6 +1,6 @@
 import json
 import sys
-from scrape_ai_mode import scrape_ai_mode
+from app.utils.scrape_ai_mode import scrape_ai_mode
 
 if __name__ == '__main__':
     # Get query from command line or use default

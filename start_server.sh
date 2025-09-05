@@ -10,6 +10,9 @@ echo "Directory: $SCRIPT_DIR"
 # Activate virtual environment
 source .venv/bin/activate
 
+# Load environment variables from .env file
+set -a && source .env && set +a
+
 # Detect active network interface and get IP addresses
 echo "Server will be accessible at:"
 
@@ -34,11 +37,11 @@ if [ -n "$LOCAL_IPV6" ]; then
 fi
 
 echo ""
-echo "API Key required: X-API-Key: is_hotdog_or_not"
+echo "API Key required: X-API-Key: $horse_key"
 
 # Show curl example only if we have an IPv4
 if [ -n "$LOCAL_IPV4" ]; then
-    echo "Example: curl -H \"X-API-Key: is_hotdog_or_not\" \"http://$LOCAL_IPV4:8000/search?query=test\""
+    echo "Example: curl -H \"X-API-Key: $horse_key\" \"http://$LOCAL_IPV4:8000/search?query=test\""
 else
     echo "Note: No IPv4 detected on en0 or en1; server started on port 8000. Check your network interface."
 fi
@@ -48,4 +51,4 @@ echo "Press Ctrl+C to stop the server"
 echo "----------------------------------------"
 
 # Start the server
-uvicorn server:app --host 0.0.0.0 --port 8000
+uvicorn app.server:app --host 0.0.0.0 --port 8000
