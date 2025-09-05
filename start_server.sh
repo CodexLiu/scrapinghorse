@@ -13,6 +13,13 @@ source .venv/bin/activate
 # Load environment variables from .env file
 set -a && source .env && set +a
 
+# Setup logging
+mkdir -p logs
+LOG_FILE="logs/server-$(date +'%Y%m%d_%H%M%S').log"
+ln -sf "$(basename "$LOG_FILE")" logs/latest.log
+echo "Server logs will be written to: $LOG_FILE"
+echo ""
+
 # Detect active network interface and get IP addresses
 echo "Server will be accessible at:"
 
@@ -51,4 +58,4 @@ echo "Press Ctrl+C to stop the server"
 echo "----------------------------------------"
 
 # Start the server
-uvicorn app.server:app --host 0.0.0.0 --port 8000
+uvicorn app.server:app --host 0.0.0.0 --port 8000 2>&1 | tee -a "$LOG_FILE"

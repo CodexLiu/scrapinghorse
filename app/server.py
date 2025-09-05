@@ -2,12 +2,24 @@ import asyncio
 import os
 import threading
 from typing import Dict, Any
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from app.utils.scrape_ai_mode import init_driver_session, run_job, reset_to_start, start_usage_capture, end_usage_capture_gb
 from app.utils.queue import JobQueue
 
 API_KEY = os.getenv("horse_key")
 app = FastAPI()
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler to return structured JSON error responses."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "error_type": exc.__class__.__name__
+        }
+    )
 
 # Global Chrome driver and request queue
 chrome_driver = None
