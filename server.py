@@ -11,6 +11,10 @@ app = FastAPI()
 chrome_driver = None
 driver_lock = threading.Lock()
 
+@app.get("/")
+async def root():
+    return {"message": "API is healthy"}
+
 @app.on_event("startup")
 async def on_startup():
     """Initialize the single Chrome session on server startup."""
