@@ -4,7 +4,21 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "Starting scraping server..."
+# Parse workers argument (default to 1)
+WORKERS=1
+if [ "$1" ]; then
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+        WORKERS=$1
+        echo "Starting server with $WORKERS worker processes..."
+    else
+        echo "Usage: $0 [number_of_workers]"
+        echo "Example: $0 2  # Start with 2 worker processes"
+        exit 1
+    fi
+else
+    echo "Starting scraping server with 1 worker process..."
+fi
+
 echo "Directory: $SCRIPT_DIR"
 
 # Activate virtual environment
@@ -58,4 +72,4 @@ echo "Press Ctrl+C to stop the server"
 echo "----------------------------------------"
 
 # Start the server
-uvicorn app.server:app --host 0.0.0.0 --port 8000 2>&1 | tee -a "$LOG_FILE"
+uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers "$WORKERS" 2>&1 | tee -a "$LOG_FILE"

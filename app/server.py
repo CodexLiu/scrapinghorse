@@ -82,7 +82,7 @@ async def on_shutdown():
         except Exception as e:
             print(f"Error stopping job queue: {e}")
     
-    # Close Chrome session
+    # Close Chrome sessions
     if chrome_driver:
         try:
             chrome_driver.quit()
