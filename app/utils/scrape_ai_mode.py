@@ -3,15 +3,202 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 import time
 import os
+import tempfile
+import shutil
+import json
+import subprocess
+import math
 from .ai_mode_parser import extract_structured_from_html
 
 # Configuration constants
 START_URL = "https://www.google.com/search?udm=50&q="
 ENABLE_USAGE_ESTIMATE = os.getenv('ENABLE_USAGE_ESTIMATE', '0') == '1'
 
+def _get_screen_size_macos() -> tuple[int, int]:
+    """Get screen dimensions on macOS using AppleScript."""
+    try:
+        result = subprocess.check_output([
+            "osascript", "-e",
+            'tell application "Finder" to get bounds of window of desktop'
+        ], text=True).strip()
+        # Parse result like "0, 0, 1920, 1080"
+        parts = [int(p.strip()) for p in result.replace(",", " ").split()]
+        width = parts[2] - parts[0]
+        height = parts[3] - parts[1]
+        return width, height
+    except Exception:
+        # Fallback to reasonable default
+        return 1440, 900
+
+def _compute_grid(workers: int) -> tuple[int, int]:
+    """Compute grid dimensions for given number of workers."""
+    workers = max(1, workers)
+    cols = int(math.ceil(math.sqrt(workers)))
+    rows = int(math.ceil(workers / cols))
+    return cols, rows
+
+def _slot_to_position(workers: int, slot: int, margin: int) -> tuple[int, int]:
+    """Convert slot number to x,y position on screen."""
+    screen_width, screen_height = _get_screen_size_macos()
+    cols, rows = _compute_grid(workers)
+    
+    # Calculate position within grid
+    col = slot % cols
+    row = slot // cols
+    
+    # Calculate window position (not changing size, just position)
+    x = margin + col * ((screen_width - (cols + 1) * margin) // cols + margin)
+    y = margin + row * ((screen_height - (rows + 1) * margin) // rows + margin)
+    
+    return x, y
+
+def _allocate_slot(workers: int) -> int:
+    """Allocate a unique window slot for this process."""
+    cols, rows = _compute_grid(workers)
+    total_slots = cols * rows
+    
+    # Try to claim a slot using lock files
+    for slot in range(total_slots):
+        try:
+            # Try to create lock file atomically
+            lock_path = f".window_slots/slot_{slot}"
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return slot
+        except FileExistsError:
+            continue
+        except Exception:
+            continue
+    
+    # If all slots taken, use process ID as fallback
+    return os.getpid() % total_slots
+
+def _prepare_oxylabs_extension():
+    """Prepare Oxylabs proxy extension with credentials from environment variables."""
+    username = os.getenv('OXYLABS_USERNAME')
+    password = os.getenv('OXYLABS_PASSWORD')
+    
+    if not username or not password:
+        return None
+    
+    # Build full username with US country targeting
+    username_full = f"customer-{username}-cc-US"
+    
+    # Get proxy settings from env or use defaults
+    proxy_host = os.getenv('OXYLABS_PROXY_HOST', 'pr.oxylabs.io')
+    proxy_port = os.getenv('OXYLABS_PROXY_PORT', '7777')
+    
+    try:
+        # Create temp directory for extension
+        temp_dir = tempfile.mkdtemp(prefix='oxylabs_ext_')
+        
+        # Copy extension files to temp directory
+        extension_source = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'oxylabs_proxy_extension')
+        if os.path.exists(extension_source):
+            shutil.copytree(extension_source, temp_dir, dirs_exist_ok=True)
+        else:
+            # If source doesn't exist, create minimal files
+            manifest = {
+                "manifest_version": 3,
+                "name": "Oxylabs Proxy Extension",
+                "version": "1.0",
+                "permissions": ["proxy", "storage", "webRequest"],
+                "host_permissions": ["<all_urls>"],
+                "background": {"service_worker": "background.js"},
+                "minimum_chrome_version": "96"
+            }
+            
+            background_js = '''
+chrome.runtime.onStartup.addListener(setupProxy);
+chrome.runtime.onInstalled.addListener(setupProxy);
+
+async function setupProxy() {
+  try {
+    const response = await fetch(chrome.runtime.getURL('config.json'));
+    const config = await response.json();
+    
+    const proxyConfig = {
+      value: {
+        mode: "fixed_servers",
+        rules: {
+          singleProxy: {
+            scheme: config.protocol || "http",
+            host: config.host,
+            port: parseInt(config.port)
+          }
+        }
+      },
+      scope: "regular"
+    };
+    
+    await chrome.proxy.settings.set(proxyConfig);
+    console.log('Oxylabs proxy configured:', config.host + ':' + config.port);
+    
+  } catch (error) {
+    console.error('Failed to setup proxy:', error);
+  }
+}
+
+chrome.webRequest.onAuthRequired.addListener(
+  function(details) {
+    return new Promise(async (resolve) => {
+      try {
+        const response = await fetch(chrome.runtime.getURL('config.json'));
+        const config = await response.json();
+        
+        resolve({
+          authCredentials: {
+            username: config.username_full,
+            password: config.password
+          }
+        });
+      } catch (error) {
+        console.error('Auth failed:', error);
+        resolve({});
+      }
+    });
+  },
+  { urls: ["<all_urls>"] },
+  ["blocking"]
+);
+
+setupProxy();
+            '''
+            
+            with open(os.path.join(temp_dir, 'manifest.json'), 'w') as f:
+                json.dump(manifest, f, indent=2)
+            
+            with open(os.path.join(temp_dir, 'background.js'), 'w') as f:
+                f.write(background_js)
+        
+        # Create config.json with proxy credentials
+        config = {
+            "host": proxy_host,
+            "port": proxy_port,
+            "username_full": username_full,
+            "password": password,
+            "protocol": "http"
+        }
+        
+        with open(os.path.join(temp_dir, 'config.json'), 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"✅ Oxylabs proxy extension prepared: {username_full}@{proxy_host}:{proxy_port}")
+        return temp_dir
+        
+    except Exception as e:
+        print(f"❌ Failed to prepare Oxylabs extension: {e}")
+        return None
+
 def _build_options(binary_path: str = None) -> uc.ChromeOptions:
     """Build fresh Chrome options to avoid reuse errors."""
     options = uc.ChromeOptions()
+    
+    # Configure Oxylabs proxy extension if credentials are available
+    extension_path = _prepare_oxylabs_extension()
+    if extension_path:
+        options.add_argument(f'--load-extension={extension_path}')
+        print("🔄 Oxylabs proxy extension loaded")
     
     # Configure Chrome for Docker/headful operation
     if os.environ.get('DISPLAY'):  # Running in Docker with display
@@ -170,6 +357,18 @@ def scrape_ai_mode_with_fallback(query: str, max_wait_seconds: int = 10) -> dict
 def init_driver_session() -> uc.Chrome:
     """Initialize a persistent Chrome driver session at Google AI Mode start page."""
     driver = create_driver()
+    
+    # Position window in grid layout
+    try:
+        workers = int(os.getenv("WORKERS", "1"))
+        margin = int(os.getenv("WINDOW_MARGIN", "20"))
+        slot = _allocate_slot(workers)
+        x, y = _slot_to_position(workers, slot, margin)
+        driver.set_window_position(x, y)
+        print(f"Chrome window positioned at slot {slot}: ({x}, {y})")
+    except Exception as e:
+        print(f"Warning: Could not position window: {e}")
+    
     # Wait a moment for Chrome to fully stabilize before navigating
     print("Waiting for Chrome to stabilize...")
     time.sleep(2)

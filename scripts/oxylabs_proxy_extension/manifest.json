@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Oxylabs Proxy Extension",
+  "version": "1.0",
+  "description": "Routes traffic through Oxylabs residential proxies",
+  "permissions": [
+    "proxy",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "96"
+}

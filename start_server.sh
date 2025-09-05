@@ -19,6 +19,9 @@ else
     echo "Starting scraping server with 1 worker process..."
 fi
 
+# Export WORKERS for child processes
+export WORKERS
+
 echo "Directory: $SCRIPT_DIR"
 
 # Activate virtual environment
@@ -32,6 +35,11 @@ mkdir -p logs
 LOG_FILE="logs/server-$(date +'%Y%m%d_%H%M%S').log"
 ln -sf "$(basename "$LOG_FILE")" logs/latest.log
 echo "Server logs will be written to: $LOG_FILE"
+
+# Setup window positioning
+rm -rf .window_slots && mkdir -p .window_slots
+export WINDOW_MARGIN="${WINDOW_MARGIN:-20}"
+
 echo ""
 
 # Detect active network interface and get IP addresses
@@ -68,8 +76,40 @@ else
 fi
 
 echo ""
-echo "Press Ctrl+C to stop the server"
+
+# Start localtunnel in background
+echo "Starting localtunnel..."
+lt --port 8000 --subdomain scrapinghorse > logs/tunnel.log 2>&1 &
+TUNNEL_PID=$!
+
+# Wait a moment for tunnel to establish
+sleep 3
+
+# Check if tunnel started successfully
+if kill -0 $TUNNEL_PID 2>/dev/null; then
+    echo "✅ Localtunnel started: https://scrapinghorse.loca.lt"
+    echo "   Tunnel PID: $TUNNEL_PID"
+else
+    echo "❌ Failed to start localtunnel"
+fi
+
+echo ""
+echo "Press Ctrl+C to stop the server and tunnel"
 echo "----------------------------------------"
+
+# Function to cleanup on exit
+cleanup() {
+    echo ""
+    echo "Shutting down..."
+    if kill -0 $TUNNEL_PID 2>/dev/null; then
+        echo "Stopping localtunnel (PID: $TUNNEL_PID)..."
+        kill $TUNNEL_PID
+    fi
+    exit 0
+}
+
+# Set trap to cleanup on script exit
+trap cleanup SIGINT SIGTERM
 
 # Start the server
 uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers "$WORKERS" 2>&1 | tee -a "$LOG_FILE"
