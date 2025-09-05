@@ -13,6 +13,8 @@ from .ai_mode_parser import extract_structured_from_html
 # Configuration constants
 START_URL = "https://www.google.com/search?udm=50&q="
 ENABLE_USAGE_ESTIMATE = os.getenv('ENABLE_USAGE_ESTIMATE', '0') == '1'
+PROXIES_ENABLED = os.getenv('ENABLE_PROXIES', '0').lower() in ('1', 'true', 'yes')
+ROTATE_MAX_ATTEMPTS = int(os.getenv('ROTATE_MAX_ATTEMPTS', '3')) if PROXIES_ENABLED else 1
 
 def _get_screen_size_macos() -> tuple[int, int]:
     """Get screen dimensions on macOS using AppleScript."""
@@ -190,15 +192,9 @@ setupProxy();
         print(f"❌ Failed to prepare Oxylabs extension: {e}")
         return None
 
-def _build_options(binary_path: str = None) -> uc.ChromeOptions:
-    """Build fresh Chrome options to avoid reuse errors."""
+def _build_options_basic(binary_path: str = None) -> uc.ChromeOptions:
+    """Build basic Chrome options without proxy configuration."""
     options = uc.ChromeOptions()
-    
-    # Configure Oxylabs proxy extension if credentials are available
-    extension_path = _prepare_oxylabs_extension()
-    if extension_path:
-        options.add_argument(f'--load-extension={extension_path}')
-        print("🔄 Oxylabs proxy extension loaded")
     
     # Configure Chrome for Docker/headful operation
     if os.environ.get('DISPLAY'):  # Running in Docker with display
@@ -217,10 +213,79 @@ def _build_options(binary_path: str = None) -> uc.ChromeOptions:
 
 def create_driver() -> uc.Chrome:
     """Create and return a configured Chrome driver instance."""
-    # M1 Mac compatibility: try different approaches with fresh options each time
+    
+    # Check if proxies are enabled
+    if not PROXIES_ENABLED:
+        print("🔄 Proxies disabled - using direct connection")
+        # Direct connection (no proxy) - use undetected_chromedriver
+        try:
+            # First try with no version specified (auto-detect)
+            driver = uc.Chrome(options=_build_options_basic(), use_subprocess=False)
+            return driver
+        except Exception as e:
+            print(f"Auto-detect failed: {e}")
+            
+            try:
+                # Try with explicit Chrome path for M1 Macs (only on native Mac, not Docker)
+                if not os.environ.get('DISPLAY'):
+                    binary_path = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+                    driver = uc.Chrome(options=_build_options_basic(binary_path), use_subprocess=False)
+                    return driver
+                else:
+                    raise e  # Re-raise to try fallback
+            except Exception as e2:
+                print(f"Explicit path failed: {e2}")
+                
+                # Fallback to original approach with version specification
+                try:
+                    driver = uc.Chrome(options=_build_options_basic(), use_subprocess=False, version_main=139)
+                    return driver
+                except Exception as e3:
+                    print(f"Version fallback failed: {e3}")
+                    raise Exception(f"All Chrome initialization attempts failed. Last error: {e3}")
+    
+    # Proxies enabled - check if Oxylabs credentials are available
+    username = os.getenv('OXYLABS_USERNAME')
+    password = os.getenv('OXYLABS_PASSWORD')
+    
+    if username and password:
+        # Use selenium-wire for proxy with authentication
+        from seleniumwire import webdriver
+        from seleniumwire.utils import decode
+        
+        # Build full username with US country targeting
+        username_full = f"customer-{username}-cc-US"
+        proxy_host = os.getenv('OXYLABS_PROXY_HOST', 'pr.oxylabs.io')
+        proxy_port = os.getenv('OXYLABS_PROXY_PORT', '7777')
+        
+        # Configure proxy options for selenium-wire
+        seleniumwire_options = {
+            'proxy': {
+                'http': f'http://{username_full}:{password}@{proxy_host}:{proxy_port}',
+                'https': f'http://{username_full}:{password}@{proxy_host}:{proxy_port}',
+            }
+        }
+        
+        print(f"🔄 Creating driver with Oxylabs proxy: {username_full}@{proxy_host}:{proxy_port}")
+        
+        # M1 Mac compatibility with proxy
+        try:
+            options = _build_options_basic()  # Use basic options without proxy config
+            driver = webdriver.Chrome(
+                options=options,
+                seleniumwire_options=seleniumwire_options
+            )
+            return driver
+        except Exception as e:
+            print(f"Proxy driver creation failed: {e}")
+            # Fallback to direct connection
+            print("Falling back to direct connection...")
+    
+    # Direct connection fallback (no proxy or proxy failed)
+    print("ℹ️  Using direct connection (no proxy)")
     try:
         # First try with no version specified (auto-detect)
-        driver = uc.Chrome(options=_build_options(), use_subprocess=False)
+        driver = uc.Chrome(options=_build_options_basic(), use_subprocess=False)
         return driver
     except Exception as e:
         print(f"Auto-detect failed: {e}")
@@ -229,7 +294,7 @@ def create_driver() -> uc.Chrome:
             # Try with explicit Chrome path for M1 Macs (only on native Mac, not Docker)
             if not os.environ.get('DISPLAY'):
                 binary_path = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-                driver = uc.Chrome(options=_build_options(binary_path), use_subprocess=False)
+                driver = uc.Chrome(options=_build_options_basic(binary_path), use_subprocess=False)
                 return driver
             else:
                 raise e  # Re-raise to try fallback
@@ -238,7 +303,7 @@ def create_driver() -> uc.Chrome:
             
             # Fallback to original approach with version specification
             try:
-                driver = uc.Chrome(options=_build_options(), use_subprocess=False, version_main=139)
+                driver = uc.Chrome(options=_build_options_basic(), use_subprocess=False, version_main=139)
                 return driver
             except Exception as e3:
                 print(f"Version fallback failed: {e3}")
@@ -354,6 +419,117 @@ def scrape_ai_mode_with_fallback(query: str, max_wait_seconds: int = 10) -> dict
         # Try once more with longer timeout
         return scrape_ai_mode(query, max_wait_seconds * 2)
 
+def is_blocked_or_captcha(driver: uc.Chrome) -> bool:
+    """Check if the current page indicates blocking or CAPTCHA."""
+    try:
+        current_url = driver.current_url.lower()
+        
+        # Check for common Google blocking URLs
+        if any(pattern in current_url for pattern in ['/sorry/', '/validate', '/sorry/index']):
+            return True
+        
+        # Check page content for blocking indicators
+        page_source = driver.page_source.lower()
+        blocking_indicators = [
+            'unusual traffic',
+            'are you a robot',
+            'captcha',
+            'verify you are human',
+            'automated queries'
+        ]
+        
+        if any(indicator in page_source for indicator in blocking_indicators):
+            return True
+        
+        # Check for reCAPTCHA elements
+        try:
+            driver.find_element(By.CSS_SELECTOR, "iframe[src*='recaptcha']")
+            return True
+        except:
+            pass
+        
+        return False
+    except Exception:
+        # If we can't check, assume not blocked
+        return False
+
+def reinit_driver_with_rotation(prev_driver: uc.Chrome) -> uc.Chrome:
+    """Safely quit previous driver and create new one with fresh Oxylabs proxy connection."""
+    print("🔄 Rotating proxy and reinitializing driver...")
+    
+    # Safely quit the previous driver
+    try:
+        if prev_driver:
+            prev_driver.quit()
+    except Exception as e:
+        print(f"Warning: Error quitting previous driver: {e}")
+    
+    # Create new driver (this will get a fresh Oxylabs proxy connection)
+    new_driver = create_driver()
+    
+    # Position window in grid layout (copied from init_driver_session)
+    try:
+        workers = int(os.getenv("WORKERS", "1"))
+        margin = int(os.getenv("WINDOW_MARGIN", "20"))
+        slot = _allocate_slot(workers)
+        x, y = _slot_to_position(workers, slot, margin)
+        new_driver.set_window_position(x, y)
+        print(f"Chrome window positioned at slot {slot}: ({x}, {y})")
+    except Exception as e:
+        print(f"Warning: Could not position window: {e}")
+    
+    # Wait for Chrome to stabilize
+    time.sleep(2)
+    
+    return new_driver
+
+def go_to_google_start_with_retry(driver: uc.Chrome, max_attempts: int = 3) -> uc.Chrome:
+    """Navigate to Google AI Mode with retry and IP rotation on blocking."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"Attempting to navigate to Google AI Mode (attempt {attempt}/{max_attempts})...")
+            
+            # Navigate to Google AI Mode
+            driver.get(START_URL)
+            
+            # Check if we're blocked
+            if is_blocked_or_captcha(driver):
+                print(f"❌ Detected blocking/CAPTCHA on attempt {attempt}")
+                if attempt < max_attempts:
+                    driver = reinit_driver_with_rotation(driver)
+                    continue
+                else:
+                    raise Exception("Still blocked after maximum rotation attempts")
+            
+            # Poll for search box element to be available (0.1s intervals, max 5s)
+            print("Waiting for search box to load...")
+            search_box = None
+            for check_attempt in range(50):  # 50 * 0.1s = 5 seconds max
+                try:
+                    search_box = driver.find_element(By.CSS_SELECTOR, "textarea[jsname='qyBLR']")
+                    print(f"✅ Search box found after {(check_attempt + 1) * 0.1:.1f} seconds")
+                    return driver  # Success!
+                except:
+                    time.sleep(0.1)
+            
+            # Search box not found - likely blocked
+            print(f"❌ Search box not found on attempt {attempt} - likely blocked")
+            if attempt < max_attempts:
+                driver = reinit_driver_with_rotation(driver)
+                continue
+            else:
+                raise Exception("Search box element not found after maximum rotation attempts")
+                
+        except Exception as e:
+            if attempt < max_attempts:
+                print(f"❌ Error on attempt {attempt}: {e}")
+                driver = reinit_driver_with_rotation(driver)
+                continue
+            else:
+                raise Exception(f"Initialization failed after {max_attempts} rotation attempts: {e}")
+    
+    return driver
+
 def init_driver_session() -> uc.Chrome:
     """Initialize a persistent Chrome driver session at Google AI Mode start page."""
     driver = create_driver()
@@ -372,37 +548,65 @@ def init_driver_session() -> uc.Chrome:
     # Wait a moment for Chrome to fully stabilize before navigating
     print("Waiting for Chrome to stabilize...")
     time.sleep(2)
-    go_to_google_start(driver)
+    
+    # Navigate with retry and rotation
+    driver = go_to_google_start_with_retry(driver, max_attempts=ROTATE_MAX_ATTEMPTS)
     return driver
 
 def run_job(driver: uc.Chrome, query: str, max_wait_seconds: int) -> dict:
     """Run a search job using an existing driver session."""
     return perform_search_and_extract(driver, query, max_wait_seconds)
 
-def reset_to_start(driver: uc.Chrome) -> None:
-    """Reset driver session back to Google AI Mode start page."""
-    try:
-        # Clear any existing text in the search box first
-        search_box = driver.find_element(By.CSS_SELECTOR, "textarea[jsname='qyBLR']")
-        search_box.clear()
+def reset_to_start(driver: uc.Chrome) -> uc.Chrome:
+    """Reset driver session - with IP rotation if proxies enabled, soft reset if disabled."""
+    
+    if PROXIES_ENABLED:
+        # Full rotation when proxies are enabled
+        print("🔄 Resetting with IP rotation...")
         
-        # Navigate back to the start page
-        driver.get(START_URL)
+        # Always rotate IP by recreating driver with fresh Oxylabs connection
+        new_driver = reinit_driver_with_rotation(driver)
         
-        # Wait for search box to be ready
-        for attempt in range(30):  # 30 * 0.1s = 3 seconds max
-            try:
-                search_box = driver.find_element(By.CSS_SELECTOR, "textarea[jsname='qyBLR']")
-                if search_box.is_enabled():
-                    print("✅ Reset complete - search box ready")
-                    break
-            except:
-                pass
-            time.sleep(0.1)
-    except Exception as e:
-        print(f"Warning: Error during reset: {e}")
-        # If reset fails, try full navigation
-        go_to_google_start(driver)
+        # Navigate to start page with retry logic
+        new_driver = go_to_google_start_with_retry(new_driver, max_attempts=ROTATE_MAX_ATTEMPTS)
+        
+        print("✅ Reset complete with fresh IP - search box ready")
+        return new_driver
+    else:
+        # Soft reset when proxies are disabled
+        print("🔄 Resetting without IP rotation...")
+        
+        try:
+            # Try soft reset first - clear search box and navigate back
+            search_box = driver.find_element(By.CSS_SELECTOR, "textarea[jsname='qyBLR']")
+            search_box.clear()
+            
+            # Navigate back to the start page
+            driver.get(START_URL)
+            
+            # Wait for search box to be ready
+            for attempt in range(30):  # 30 * 0.1s = 3 seconds max
+                try:
+                    search_box = driver.find_element(By.CSS_SELECTOR, "textarea[jsname='qyBLR']")
+                    if search_box.is_enabled():
+                        print("✅ Soft reset complete - search box ready")
+                        return driver
+                except:
+                    pass
+                time.sleep(0.1)
+            
+            # Soft reset failed, recreate driver once
+            print("⚠️ Soft reset failed, recreating driver...")
+            
+        except Exception as e:
+            print(f"⚠️ Soft reset error: {e}, recreating driver...")
+        
+        # Recreate driver and navigate once (no rotation attempts)
+        new_driver = reinit_driver_with_rotation(driver)
+        new_driver = go_to_google_start_with_retry(new_driver, max_attempts=1)
+        
+        print("✅ Reset complete with new driver - search box ready")
+        return new_driver
 
 def is_ready(driver: uc.Chrome) -> bool:
     """Check if the driver is in ready state with search bar available and enabled."""

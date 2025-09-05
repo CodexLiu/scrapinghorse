@@ -36,6 +36,19 @@ async def on_startup():
     global chrome_driver, request_queue
     print("Starting up server - initializing Chrome session...")
     
+    # Log proxy configuration
+    proxies_enabled = os.getenv('ENABLE_PROXIES', '0').lower() in ('1', 'true', 'yes')
+    if proxies_enabled:
+        proxy_host = os.getenv('OXYLABS_PROXY_HOST', 'pr.oxylabs.io')
+        proxy_port = os.getenv('OXYLABS_PROXY_PORT', '7777')
+        username = os.getenv('OXYLABS_USERNAME')
+        if username:
+            print(f"🔄 Proxies ENABLED - using {proxy_host}:{proxy_port} with user: customer-{username}-cc-US")
+        else:
+            print("⚠️ Proxies ENABLED but no OXYLABS_USERNAME found - will use direct connection")
+    else:
+        print("ℹ️ Proxies DISABLED - using direct connection")
+    
     try:
         chrome_driver = init_driver_session()
         print("Chrome session ready - initializing job queue...")
@@ -50,19 +63,20 @@ async def on_startup():
 
 async def process_job(job) -> dict:
     """Process a single search job using the Chrome driver."""
+    global chrome_driver
     with driver_lock:
         try:
             start_usage_capture(chrome_driver)
             result = await asyncio.to_thread(run_job, chrome_driver, job.query, job.max_wait_seconds)
             usage_gb = end_usage_capture_gb(chrome_driver)
             print(f"Request data usage: {usage_gb:.4f} GB")
-            await asyncio.to_thread(reset_to_start, chrome_driver)
+            chrome_driver = await asyncio.to_thread(reset_to_start, chrome_driver)
             print("Job completed, driver reset")
             return result
         except Exception as e:
             print(f"Error processing job: {e}")
             try:
-                await asyncio.to_thread(reset_to_start, chrome_driver)
+                chrome_driver = await asyncio.to_thread(reset_to_start, chrome_driver)
                 print("Driver reset after error")
             except Exception as reset_error:
                 print(f"Failed to reset driver: {reset_error}")
