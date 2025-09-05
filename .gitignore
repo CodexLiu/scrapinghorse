@@ -3,6 +3,7 @@
 .env
 env/
 __pycache__/
+!.env.example
 .ruff_cache/
 .vscode/
 .pytest_cache/
