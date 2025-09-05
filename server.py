@@ -1,10 +1,11 @@
 import asyncio
+import os
 import threading
 from typing import Dict, Any
 from fastapi import FastAPI, Header, HTTPException, Query
 from scrape_ai_mode import init_driver_session, run_job, reset_to_start, start_usage_capture, end_usage_capture_gb
 
-API_KEY = "is_hotdog_or_not"
+API_KEY = os.getenv("horse_key")
 app = FastAPI()
 
 # Global Chrome driver and lock for thread safety
