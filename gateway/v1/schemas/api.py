@@ -44,7 +44,7 @@ class Metadata(BaseModel):
     
     def set_credits_used(self):
         usage = random.randint(1, 100)
-        self.credits_used = random.choice(BARN_ANIMALS) + " " + str(usage)
+        self.credits_used = str(usage) + " " + random.choice(BARN_ANIMALS)
 
 
 class SearchResponse(BaseModel):
