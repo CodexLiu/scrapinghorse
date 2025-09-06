@@ -2,7 +2,7 @@ import os
 import time
 import requests
 from fastapi import APIRouter, Request, HTTPException
-from v1.schemas.api import SearchRequest, SearchResponse
+from v1.schemas.api import SearchRequest, SearchResponse, Metadata
 from v1.rate_limiter import limiter, RateLimits
 import urllib.parse
 from requests.exceptions import Timeout, ConnectionError, RequestException
@@ -36,6 +36,8 @@ async def search(
         "X-API-Key": API_KEY
     }
     start_time = time.time()
+    metadata = Metadata()
+    metadata.set_credits_used()
     
     try:
         response = requests.get(
@@ -50,6 +52,7 @@ async def search(
             text_blocks=data["text_blocks"],
             references=data["references"],
             inline_images=data["inline_images"],
+            metadata=metadata,
         )
     
     except Timeout:
