@@ -5,22 +5,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Parse workers argument (default to 1)
-WORKERS=1
+CHROME_WORKERS=1
 if [ "$1" ]; then
     if [[ "$1" =~ ^[0-9]+$ ]]; then
-        WORKERS=$1
-        echo "Starting server with $WORKERS worker processes..."
+        CHROME_WORKERS=$1
+        echo "Starting scraping server with $CHROME_WORKERS Chrome worker(s)..."
     else
-        echo "Usage: $0 [number_of_workers]"
-        echo "Example: $0 2  # Start with 2 worker processes"
+        echo "Usage: $0 [number_of_chrome_workers]"
+        echo "Example: $0 2  # Start with 2 Chrome worker processes"
         exit 1
     fi
 else
-    echo "Starting scraping server with 1 worker process..."
+    echo "Starting scraping server with 1 Chrome worker..."throug
 fi
 
-# Export WORKERS for child processes
-export WORKERS
+# Export CHROME_WORKERS for child processes
+export CHROME_WORKERS
 
 echo "Directory: $SCRIPT_DIR"
 
@@ -111,5 +111,5 @@ cleanup() {
 # Set trap to cleanup on script exit
 trap cleanup SIGINT SIGTERM
 
-# Start the server
-uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers "$WORKERS" 2>&1 | tee -a "$LOG_FILE"
+# Start the server with single uvicorn process (workers managed internally)
+uvicorn app.server:app --host 0.0.0.0 --port 8000 --workers 1 2>&1 | tee -a "$LOG_FILE"

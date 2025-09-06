@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Callable, Awaitable, Any
+from typing import Callable, Awaitable, Any, List
+import threading
 
 @dataclass
 class SearchJob:
@@ -9,76 +10,109 @@ class SearchJob:
     max_wait_seconds: int
     future: asyncio.Future
 
-class JobQueue:
-    """FIFO job queue with background worker for processing search requests."""
+@dataclass
+class Worker:
+    """Represents a worker with its own driver, queue, and state."""
+    id: int
+    driver: Any  # Chrome driver instance
+    queue: asyncio.Queue[SearchJob]
+    state: str  # ready|busy|stopped
+    lock: threading.Lock
+
+class JobRouter:
+    """Routes jobs round-robin to N persistent workers."""
     
-    def __init__(self):
-        self.queue: asyncio.Queue[SearchJob] = asyncio.Queue()
-        self.worker_task: asyncio.Task = None
-        self.state: str = "initializing"  # initializing|ready|busy|stopped
+    def __init__(self, workers: List[Worker]):
+        self.workers = workers
+        self._next_idx = 0
+        self.worker_tasks: List[asyncio.Task] = []
         
-    async def start(self, process_fn: Callable[[SearchJob], Awaitable[Any]]):
-        """Start the background worker with the given processing function."""
-        if self.worker_task and not self.worker_task.done():
-            return
+    async def start(self, process_fn: Callable[[Worker, SearchJob], Awaitable[Any]]):
+        """Start all worker loops with the given processing function."""
+        # Stop any existing tasks
+        await self.stop()
+        
+        # Start worker loops
+        for worker in self.workers:
+            task = asyncio.create_task(self._worker_loop(worker, process_fn))
+            self.worker_tasks.append(task)
             
-        self.worker_task = asyncio.create_task(self._worker_loop(process_fn))
-        
-    async def _worker_loop(self, process_fn: Callable[[SearchJob], Awaitable[Any]]):
-        """Background worker loop that processes jobs FIFO."""
-        self.state = "ready"
-        print("✅ Queue worker ready - accepting jobs")
+    async def _worker_loop(self, worker: Worker, process_fn: Callable[[Worker, SearchJob], Awaitable[Any]]):
+        """Background worker loop that processes jobs for a specific worker."""
+        worker.state = "ready"
+        print(f"✅ Worker {worker.id} ready - accepting jobs")
         
         while True:
             try:
                 # Wait for next job
-                job = await self.queue.get()
+                job = await worker.queue.get()
                 
                 # Process the job
-                self.state = "busy"
-                print(f"Processing job: {job.query}")
+                worker.state = "busy"
+                print(f"Worker {worker.id} processing job: {job.query}")
                 
                 try:
-                    result = await process_fn(job)
+                    result = await process_fn(worker, job)
                     job.future.set_result(result)
                 except Exception as e:
                     job.future.set_exception(e)
                 finally:
-                    self.queue.task_done()
-                    self.state = "ready"
-                    print("Job completed, worker ready for next job")
+                    worker.queue.task_done()
+                    worker.state = "ready"
+                    print(f"Worker {worker.id} completed job, ready for next")
                     
             except asyncio.CancelledError:
-                self.state = "stopped"
-                print("Queue worker stopped")
+                worker.state = "stopped"
+                print(f"Worker {worker.id} stopped")
                 break
             except Exception as e:
-                print(f"Worker error: {e}")
+                print(f"Worker {worker.id} error: {e}")
                 continue
                 
     async def enqueue(self, query: str, max_wait_seconds: int) -> Any:
-        """Enqueue a job and return awaitable future for the result."""
+        """Enqueue a job using round-robin selection with idle preference."""
         future = asyncio.Future()
         job = SearchJob(query=query, max_wait_seconds=max_wait_seconds, future=future)
         
-        await self.queue.put(job)
-        print(f"Job enqueued: {query}")
+        # Try to find an idle worker starting from next_idx
+        selected_worker = None
+        for i in range(len(self.workers)):
+            idx = (self._next_idx + i) % len(self.workers)
+            worker = self.workers[idx]
+            if worker.state == "ready":
+                selected_worker = worker
+                self._next_idx = (idx + 1) % len(self.workers)
+                break
+        
+        # If no idle worker found, use round-robin anyway
+        if selected_worker is None:
+            selected_worker = self.workers[self._next_idx]
+            self._next_idx = (self._next_idx + 1) % len(self.workers)
+        
+        await selected_worker.queue.put(job)
+        print(f"Job enqueued to worker {selected_worker.id}: {query}")
         
         return await future
         
     async def stop(self):
-        """Stop the background worker gracefully."""
-        if self.worker_task and not self.worker_task.done():
-            self.worker_task.cancel()
+        """Stop all worker tasks gracefully."""
+        for task in self.worker_tasks:
+            if not task.done():
+                task.cancel()
+                
+        # Wait for all tasks to complete
+        if self.worker_tasks:
             try:
-                await self.worker_task
-            except asyncio.CancelledError:
+                await asyncio.gather(*self.worker_tasks, return_exceptions=True)
+            except Exception:
                 pass
                 
-    def get_state(self) -> str:
-        """Get current worker state."""
-        return self.state
+        self.worker_tasks.clear()
         
-    def size(self) -> int:
-        """Get current queue size."""
-        return self.queue.qsize()
+    def get_states(self) -> List[str]:
+        """Get current states of all workers."""
+        return [worker.state for worker in self.workers]
+        
+    def total_queue_size(self) -> int:
+        """Get total queue size across all workers."""
+        return sum(worker.queue.qsize() for worker in self.workers)

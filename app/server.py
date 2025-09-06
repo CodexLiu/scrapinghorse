@@ -5,7 +5,7 @@ from typing import Dict, Any
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from app.utils.scrape_ai_mode import init_driver_session, run_job, reset_to_start, start_usage_capture, end_usage_capture_gb
-from app.utils.queue import JobQueue
+from app.utils.queue import JobRouter, Worker
 
 API_KEY = os.getenv("horse_key")
 app = FastAPI()
@@ -21,10 +21,9 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Global Chrome driver and request queue
-chrome_driver = None
-driver_lock = threading.Lock()
-request_queue = None
+# Global worker pool and job router
+workers = []
+job_router = None
 
 @app.get("/")
 async def root():
@@ -32,9 +31,9 @@ async def root():
 
 @app.on_event("startup")
 async def on_startup():
-    """Initialize the single Chrome session and job queue on server startup."""
-    global chrome_driver, request_queue
-    print("Starting up server - initializing Chrome session...")
+    """Initialize the Chrome worker pool and job router on server startup."""
+    global workers, job_router
+    print("Starting up server - initializing Chrome worker pool...")
     
     # Log proxy configuration
     proxies_enabled = os.getenv('ENABLE_PROXIES', '0').lower() in ('1', 'true', 'yes')
@@ -50,59 +49,74 @@ async def on_startup():
         print("ℹ️ Proxies DISABLED - using direct connection")
     
     try:
-        chrome_driver = init_driver_session()
-        print("Chrome session ready - initializing job queue...")
+        # Create worker pool
+        chrome_workers = int(os.getenv("CHROME_WORKERS", "1"))
+        print(f"Creating {chrome_workers} Chrome worker(s)...")
         
-        # Initialize and start the job queue
-        request_queue = JobQueue()
-        await request_queue.start(process_job)
-        print("Server startup complete - Chrome session and job queue ready")
+        workers = []
+        for i in range(chrome_workers):
+            print(f"Initializing worker {i}...")
+            driver = init_driver_session()
+            worker = Worker(
+                id=i,
+                driver=driver,
+                queue=asyncio.Queue(),
+                state="initializing",
+                lock=threading.Lock()
+            )
+            workers.append(worker)
+            print(f"Worker {i} initialized")
+        
+        # Initialize job router
+        job_router = JobRouter(workers)
+        await job_router.start(process_job_on_worker)
+        print(f"Server startup complete - {len(workers)} Chrome workers ready")
     except Exception as e:
         print(f"Failed to initialize server: {e}")
         raise
 
-async def process_job(job) -> dict:
-    """Process a single search job using the Chrome driver."""
-    global chrome_driver
-    with driver_lock:
+async def process_job_on_worker(worker: Worker, job) -> dict:
+    """Process a single search job using a specific worker's Chrome driver."""
+    with worker.lock:
         try:
-            start_usage_capture(chrome_driver)
-            result = await asyncio.to_thread(run_job, chrome_driver, job.query, job.max_wait_seconds)
-            usage_gb = end_usage_capture_gb(chrome_driver)
-            print(f"Request data usage: {usage_gb:.4f} GB")
-            chrome_driver = await asyncio.to_thread(reset_to_start, chrome_driver)
-            print("Job completed, driver reset")
+            start_usage_capture(worker.driver)
+            result = await asyncio.to_thread(run_job, worker.driver, job.query, job.max_wait_seconds)
+            usage_gb = end_usage_capture_gb(worker.driver)
+            print(f"Worker {worker.id} request data usage: {usage_gb:.4f} GB")
+            worker.driver = await asyncio.to_thread(reset_to_start, worker.driver)
+            print(f"Worker {worker.id} job completed, driver reset")
             return result
         except Exception as e:
-            print(f"Error processing job: {e}")
+            print(f"Worker {worker.id} error processing job: {e}")
             try:
-                chrome_driver = await asyncio.to_thread(reset_to_start, chrome_driver)
-                print("Driver reset after error")
+                worker.driver = await asyncio.to_thread(reset_to_start, worker.driver)
+                print(f"Worker {worker.id} driver reset after error")
             except Exception as reset_error:
-                print(f"Failed to reset driver: {reset_error}")
+                print(f"Worker {worker.id} failed to reset driver: {reset_error}")
             raise e
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    """Clean up job queue and Chrome session on server shutdown."""
-    global chrome_driver, request_queue
+    """Clean up job router and Chrome workers on server shutdown."""
+    global workers, job_router
     print("Shutting down server...")
     
-    # Stop the job queue first
-    if request_queue:
+    # Stop the job router first
+    if job_router:
         try:
-            await request_queue.stop()
-            print("Job queue stopped")
+            await job_router.stop()
+            print("Job router stopped")
         except Exception as e:
-            print(f"Error stopping job queue: {e}")
+            print(f"Error stopping job router: {e}")
     
-    # Close Chrome sessions
-    if chrome_driver:
-        try:
-            chrome_driver.quit()
-            print("Chrome session closed")
-        except Exception as e:
-            print(f"Error closing Chrome session: {e}")
+    # Close all Chrome sessions
+    for worker in workers:
+        if worker.driver:
+            try:
+                worker.driver.quit()
+                print(f"Worker {worker.id} Chrome session closed")
+            except Exception as e:
+                print(f"Error closing worker {worker.id} Chrome session: {e}")
     
     print("Server shutdown complete")
 
@@ -119,7 +133,7 @@ async def search(
     decoded_query = query.replace('+', ' ')
     
     # Enqueue job and await result
-    result = await request_queue.enqueue(decoded_query, max_wait_seconds)
+    result = await job_router.enqueue(decoded_query, max_wait_seconds)
     return result
 
 if __name__ == "__main__":

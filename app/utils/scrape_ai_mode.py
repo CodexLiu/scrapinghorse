@@ -205,6 +205,18 @@ def _build_options_basic(binary_path: str = None) -> uc.ChromeOptions:
         options.add_argument('--window-size=1920,1080')
         # Don't add --headless for headful operation
     
+    # SSL/Certificate handling for proxy connections
+    options.add_argument('--ignore-ssl-errors-on-exit')
+    options.add_argument('--ignore-certificate-errors')
+    options.add_argument('--ignore-certificate-errors-spki-list')
+    options.add_argument('--ignore-urlfetcher-cert-requests')
+    options.add_argument('--disable-ssl-cert-validation')
+    options.add_argument('--allow-running-insecure-content')
+    options.add_argument('--disable-web-security')
+    options.add_argument('--ignore-ssl-errors')
+    options.add_argument('--accept-insecure-certs')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    
     # Set binary path if provided
     if binary_path:
         options.binary_location = binary_path
@@ -469,10 +481,10 @@ def reinit_driver_with_rotation(prev_driver: uc.Chrome) -> uc.Chrome:
     
     # Position window in grid layout (copied from init_driver_session)
     try:
-        workers = int(os.getenv("WORKERS", "1"))
+        chrome_workers = int(os.getenv("CHROME_WORKERS", "1"))
         margin = int(os.getenv("WINDOW_MARGIN", "20"))
-        slot = _allocate_slot(workers)
-        x, y = _slot_to_position(workers, slot, margin)
+        slot = _allocate_slot(chrome_workers)
+        x, y = _slot_to_position(chrome_workers, slot, margin)
         new_driver.set_window_position(x, y)
         print(f"Chrome window positioned at slot {slot}: ({x}, {y})")
     except Exception as e:
@@ -536,10 +548,10 @@ def init_driver_session() -> uc.Chrome:
     
     # Position window in grid layout
     try:
-        workers = int(os.getenv("WORKERS", "1"))
+        chrome_workers = int(os.getenv("CHROME_WORKERS", "1"))
         margin = int(os.getenv("WINDOW_MARGIN", "20"))
-        slot = _allocate_slot(workers)
-        x, y = _slot_to_position(workers, slot, margin)
+        slot = _allocate_slot(chrome_workers)
+        x, y = _slot_to_position(chrome_workers, slot, margin)
         driver.set_window_position(x, y)
         print(f"Chrome window positioned at slot {slot}: ({x}, {y})")
     except Exception as e:
