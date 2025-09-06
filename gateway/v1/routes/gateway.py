@@ -68,32 +68,31 @@ async def search(
         print(f"Connection error after {elapsed_time:.2f} seconds")
         raise HTTPException(
             status_code=502,
-            detail="Unable to connect to the search service. Please try again later."
+            detail=f"Unable to connect to the search service at {constructed_url}. Please try again later."
         )
     
     except requests.exceptions.HTTPError as e:
         elapsed_time = time.time() - start_time
         print(f"HTTP error after {elapsed_time:.2f} seconds: {e}")
-        if e.response.status_code == 401:
-            raise HTTPException(
-                status_code=502,
-                detail="Authentication failed with the search service."
-            )
-        elif e.response.status_code >= 500:
-            raise HTTPException(
-                status_code=502,
-                detail="The search service is currently experiencing issues. Please try again later."
-            )
-        else:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Search service returned an error: {e.response.status_code}"
-            )
+        
+        # Extract upstream error details
+        upstream_status = e.response.status_code
+        try:
+            upstream_error = e.response.json()
+            upstream_detail = upstream_error.get("detail", str(e))
+        except:
+            upstream_detail = e.response.text or str(e)
+        
+        # Propagate upstream status and error details to Modal
+        raise HTTPException(
+            status_code=upstream_status,
+            detail=f"Server error: {upstream_detail}"
+        )
     
     except RequestException as e:
         elapsed_time = time.time() - start_time
         print(f"Request exception after {elapsed_time:.2f} seconds: {e}")
         raise HTTPException(
             status_code=502,
-            detail="An unexpected error occurred while contacting the search service. Please try again."
+            detail=f"An unexpected error occurred while contacting the search service at {constructed_url}. Please try again."
         )
